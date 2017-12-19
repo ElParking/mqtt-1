@@ -240,15 +240,24 @@ static void s_debug_write_cb(int ev, void *ev_data, void *userdata) {
       mgos_mqtt_num_unsent_bytes() < MGOS_MQTT_LOG_PUSHBACK_THRESHOLD) {
     static uint32_t s_seq = 0;
     char *msg = arg->buf;
-    int msg_len = mg_asprintf(
+    int msg_len = 0;
+    if(){
+      struct json_out jmo = JSON_OUT_BUF(msg, MGOS_DEBUG_TMP_BUF_SIZE);
+      int msg_len = json_printf(&jmo, "{id: %Q, seq: %u ,time: %.3lf, fd:%d, message: %.*Q}",
+        (mgos_sys_config_get_device_id() ? mgos_sys_config_get_device_id()
+                                         : "-"), s_seq, mg_time(), arg->debug.fd, (int) arg->debug.len, arg->debug.data);
+    }else{
+      msg_len = mg_asprintf(
         &msg, MGOS_DEBUG_TMP_BUF_SIZE, "%s %u %.3lf %d|%.*s",
         (mgos_sys_config_get_device_id() ? mgos_sys_config_get_device_id()
                                          : "-"),
         s_seq, mg_time(), arg->fd, (int) arg->len, arg->data);
+    }
     if (arg->len > 0) {
       mgos_mqtt_pub(topic, msg, msg_len, 0 /* qos */, false);
       s_seq++;
     }
+
     if (msg != arg->buf) free(msg);
   }
 
