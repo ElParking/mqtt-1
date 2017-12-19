@@ -30,7 +30,7 @@ config_schema:
   - ["mqtt.recv_mbuf_limit", "i", 3072, {title: "Limit recv buffer size"}]
   - ["debug.stdout_topic", "s", "", {title: "MQTT topic to publish STDOUT to"}]
   - ["debug.stderr_topic", "s", "", {title: "MQTT topic to publish STDERR to"}]
-  - ["mqtt.stderr_json", "b", false, {title: "Enable Json format in stderr messages"}]
+  - ["debug.stderr_json", "b", false, {title: "Enable Json format in stderr messages"}]
 cdefs:
   MG_ENABLE_MQTT: 1
 tags:
