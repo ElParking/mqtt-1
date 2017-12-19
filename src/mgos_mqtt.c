@@ -183,6 +183,7 @@ static void mgos_mqtt_ev(struct mg_connection *nc, int ev, void *ev_data,
     case MG_EV_MQTT_UNSUBSCRIBE:
     case MG_EV_MQTT_UNSUBACK:
     case MG_EV_MQTT_PINGREQ:
+    case MG_EV_MQTT_PINGRESP:
     case MG_EV_MQTT_DISCONNECT:
       call_global_handlers(nc, ev, ev_data, user_data);
       break;
@@ -241,7 +242,7 @@ static void s_debug_write_cb(int ev, void *ev_data, void *userdata) {
     static uint32_t s_seq = 0;
     char *msg = arg->buf;
     int msg_len = 0;
-    if(){
+    if(mgos_sys_config_get_mqtt_stderr_json()){
       struct json_out jmo = JSON_OUT_BUF(msg, MGOS_DEBUG_TMP_BUF_SIZE);
       int msg_len = json_printf(&jmo, "{id: %Q, seq: %u ,time: %.3lf, fd:%d, message: %.*Q}",
         (mgos_sys_config_get_device_id() ? mgos_sys_config_get_device_id()
