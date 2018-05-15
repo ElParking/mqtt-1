@@ -1,6 +1,18 @@
 /*
- * Copyright (c) 2014-2016 Cesanta Software Limited
+ * Copyright (c) 2014-2018 Cesanta Software Limited
  * All rights reserved
+ *
+ * Licensed under the Apache License, Version 2.0 (the ""License"");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an ""AS IS"" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 /*
@@ -13,11 +25,13 @@
 #ifndef CS_FW_SRC_MGOS_MQTT_H_
 #define CS_FW_SRC_MGOS_MQTT_H_
 
+#include <stdarg.h>
 #include <stdbool.h>
 
 #include "mgos_features.h"
 #include "mgos_init.h"
 #include "mgos_mongoose.h"
+#include "mgos_sys_config.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -73,6 +87,12 @@ bool mgos_mqtt_global_connect(void);
 bool mgos_mqtt_pub(const char *topic, const void *message, size_t len, int qos,
                    bool retain);
 
+/* Variant of mgos_mqtt_pub for publishing a JSON-formatted string */
+bool mgos_mqtt_pubf(const char *topic, int qos, bool retain,
+                    const char *json_fmt, ...);
+bool mgos_mqtt_pubv(const char *topic, int qos, bool retain,
+                    const char *json_fmt, va_list ap);
+
 /*
  * Callback signature for `mgos_mqtt_sub()` below.
  */
@@ -103,6 +123,12 @@ uint16_t mgos_mqtt_get_packet_id(void);
  * we add mechanism to transparently downgrade the QoS.
  */
 void mgos_mqtt_set_max_qos(int qos);
+
+/*
+ * (Re)configure MQTT.
+ */
+struct mgos_config_mqtt;
+bool mgos_mqtt_set_config(const struct mgos_config_mqtt *cfg);
 
 #ifdef __cplusplus
 }

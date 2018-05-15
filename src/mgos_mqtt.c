@@ -1,20 +1,32 @@
 /*
- * Copyright (c) 2014-2016 Cesanta Software Limited
+ * Copyright (c) 2014-2018 Cesanta Software Limited
  * All rights reserved
+ *
+ * Licensed under the Apache License, Version 2.0 (the ""License"");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an ""AS IS"" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
+
+#include "mgos_mqtt.h"
 
 #include <stdbool.h>
 #include <stdlib.h>
-
-#include "mgos_mqtt.h"
 
 #include "common/cs_dbg.h"
 #include "common/mg_str.h"
 #include "common/platform.h"
 #include "common/queue.h"
+#include "frozen.h"
 #include "mgos_debug.h"
 #include "mgos_event.h"
-#include "mgos_mdns.h"
 #include "mgos_mongoose.h"
 #include "mgos_net.h"
 #include "mgos_sys_config.h"
@@ -50,7 +62,7 @@ static struct mg_connection *s_conn = NULL;
 static bool s_connected = false;
 static mgos_mqtt_connect_fn_t s_connect_fn = NULL;
 static void *s_connect_fn_arg = NULL;
-static int s_max_qos = 2;
+static struct mgos_config_mqtt *s_cfg = NULL;
 
 SLIST_HEAD(topic_handlers, topic_handler) s_topic_handlers;
 SLIST_HEAD(global_handlers, global_handler) s_global_handlers;
@@ -58,13 +70,13 @@ SLIST_HEAD(global_handlers, global_handler) s_global_handlers;
 static void mqtt_global_reconnect(void);
 
 void mgos_mqtt_set_max_qos(int qos) {
-  if (s_max_qos == qos) return;
+  if (s_cfg == NULL || s_cfg->max_qos == qos) return;
   LOG(LL_INFO, ("Setting max MQTT QOS to %d", qos));
-  s_max_qos = qos;
+  s_cfg->max_qos = qos;
 }
 
 static int adjust_qos(int qos) {
-  return s_max_qos < qos ? s_max_qos : qos;
+  return s_cfg != NULL && s_cfg->max_qos < qos ? s_cfg->max_qos : qos;
 }
 
 uint16_t mgos_mqtt_get_packet_id(void) {
@@ -81,7 +93,7 @@ static bool call_topic_handler(struct mg_connection *nc, int ev, void *ev_data,
   SLIST_FOREACH(th, &s_topic_handlers, entries) {
     if ((ev == MG_EV_MQTT_SUBACK && th->sub_id == msg->message_id) ||
         mg_mqtt_match_topic_expression(th->topic, msg->topic)) {
-      if (ev == MG_EV_MQTT_PUBLISH && th->qos > 0) {
+      if (ev == MG_EV_MQTT_PUBLISH && msg->qos > 0) {
         mg_mqtt_puback(nc, msg->message_id);
       }
       th->handler(nc, ev, ev_data, th->user_data);
@@ -123,18 +135,17 @@ static void mgos_mqtt_ev(struct mg_connection *nc, int ev, void *ev_data,
       if (status != 0) break;
       struct mg_send_mqtt_handshake_opts opts;
       memset(&opts, 0, sizeof(opts));
-      // char *cb_client_id = NULL, *cb_user = NULL, *cb_pass = NULL;
-      opts.user_name = mgos_sys_config_get_mqtt_user();
-      opts.password = mgos_sys_config_get_mqtt_pass();
-      if (mgos_sys_config_get_mqtt_clean_session()) {
+      opts.user_name = s_cfg->user;
+      opts.password = s_cfg->pass;
+      if (s_cfg->clean_session) {
         opts.flags |= MG_MQTT_CLEAN_SESSION;
       }
-      opts.keep_alive = mgos_sys_config_get_mqtt_keep_alive();
-      opts.will_topic = mgos_sys_config_get_mqtt_will_topic();
-      opts.will_message = mgos_sys_config_get_mqtt_will_message();
-      const char *client_id = (mgos_sys_config_get_mqtt_client_id() != NULL
-                                   ? mgos_sys_config_get_mqtt_client_id()
-                                   : mgos_sys_config_get_device_id());
+      opts.keep_alive = s_cfg->keep_alive;
+      opts.will_topic = s_cfg->will_topic;
+      opts.will_message = s_cfg->will_message;
+      const char *client_id =
+          (s_cfg->client_id != NULL ? s_cfg->client_id
+                                    : mgos_sys_config_get_device_id());
       if (s_connect_fn != NULL) {
         s_connect_fn(nc, client_id, &opts, s_connect_fn_arg);
       } else {
@@ -244,14 +255,13 @@ static void s_debug_write_cb(int ev, void *ev_data, void *userdata) {
       struct json_out jmo = JSON_OUT_BUF(msg, MGOS_DEBUG_TMP_BUF_SIZE);
       msg_len = json_printf(&jmo, "{id: %Q, seq: %u ,time: %.3lf, fd:%d, message: %.*Q}",
         (mgos_sys_config_get_device_id() ? mgos_sys_config_get_device_id()
-                                         : "-"), s_seq, mg_time(), arg->fd, (int) arg->len, arg->data);
+                                         : "-"), s_seq, mg_time(), arg->fd, (int) arg->len, (const char *) arg->data);
     }else{
       msg_len = mg_asprintf(
         &msg, MGOS_DEBUG_TMP_BUF_SIZE, "%s %u %.3lf %d|%.*s",
         (mgos_sys_config_get_device_id() ? mgos_sys_config_get_device_id()
                                          : "-"),
-        s_seq, mg_time(), arg->fd, (int) arg->len, arg->data);
-    }
+        s_seq, mg_time(), arg->fd, (int) arg->len, (const char *) arg->data);
     if (arg->len > 0) {
       mgos_mqtt_pub(topic, msg, msg_len, 0 /* qos */, false);
       s_seq++;
@@ -262,6 +272,78 @@ static void s_debug_write_cb(int ev, void *ev_data, void *userdata) {
 
   (void) ev;
   (void) userdata;
+}
+
+static void mgos_mqtt_free_config(struct mgos_config_mqtt *cfg) {
+  if (cfg == NULL) return;
+  free(cfg->server);
+  free(cfg->client_id);
+  free(cfg->user);
+  free(cfg->pass);
+  free(cfg->ssl_cert);
+  free(cfg->ssl_key);
+  free(cfg->ssl_ca_cert);
+  free(cfg->ssl_cipher_suites);
+  free(cfg->will_topic);
+  free(cfg->will_message);
+  memset(cfg, 0, sizeof(*cfg));
+}
+
+bool mgos_mqtt_set_config(const struct mgos_config_mqtt *cfg) {
+  bool ret = false;
+  struct mgos_config_mqtt *new_cfg = NULL;
+  if (!cfg->enable) {
+    ret = true;
+    goto out;
+  }
+  if (cfg->server == NULL) {
+    LOG(LL_ERROR, ("MQTT requires server name"));
+    goto out;
+  }
+  new_cfg = (struct mgos_config_mqtt *) calloc(1, sizeof(*new_cfg));
+  if (new_cfg == NULL) goto out;
+  new_cfg->enable = cfg->enable;
+  if (strchr(cfg->server, ':') == NULL) {
+    int port = (cfg->ssl_ca_cert != NULL ? 8883 : 1883);
+    mg_asprintf(&new_cfg->server, 0, "%s:%d", cfg->server, port);
+    if (new_cfg->server == NULL) goto out;
+  } else {
+    new_cfg->server = strdup(cfg->server);
+  }
+  if (cfg->client_id) new_cfg->client_id = strdup(cfg->client_id);
+  if (cfg->user) new_cfg->user = strdup(cfg->user);
+  if (cfg->pass) new_cfg->pass = strdup(cfg->pass);
+  new_cfg->reconnect_timeout_min = cfg->reconnect_timeout_min;
+  new_cfg->reconnect_timeout_max = cfg->reconnect_timeout_max;
+  if (cfg->ssl_cert) new_cfg->ssl_cert = strdup(cfg->ssl_cert);
+  if (cfg->ssl_key) new_cfg->ssl_key = strdup(cfg->ssl_key);
+  if (cfg->ssl_ca_cert) new_cfg->ssl_ca_cert = strdup(cfg->ssl_ca_cert);
+  if (cfg->ssl_cipher_suites)
+    new_cfg->ssl_cipher_suites = strdup(cfg->ssl_cipher_suites);
+  if (cfg->ssl_psk_identity)
+    new_cfg->ssl_psk_identity = strdup(cfg->ssl_psk_identity);
+  if (cfg->ssl_psk_key) new_cfg->ssl_psk_key = strdup(cfg->ssl_psk_key);
+  new_cfg->clean_session = cfg->clean_session;
+  new_cfg->keep_alive = cfg->keep_alive;
+  if (cfg->will_topic) new_cfg->will_topic = strdup(cfg->will_topic);
+  if (cfg->will_message) new_cfg->will_message = strdup(cfg->will_message);
+  new_cfg->max_qos = cfg->max_qos;
+  new_cfg->recv_mbuf_limit = cfg->recv_mbuf_limit;
+
+  ret = true;
+
+out:
+  if (ret) {
+    s_cfg = new_cfg;
+    if (s_conn != NULL) {
+      s_conn->flags |= MG_F_CLOSE_IMMEDIATELY;
+      s_conn = NULL;
+    }
+  } else {
+    mgos_mqtt_free_config(new_cfg);
+    free(new_cfg);
+  }
+  return ret;
 }
 
 bool mgos_mqtt_init(void) {
@@ -278,18 +360,10 @@ bool mgos_mqtt_init(void) {
     free(stderr_topic);
   }
 
-  if (!mgos_sys_config_get_mqtt_enable()) return true;
-  if (mgos_sys_config_get_mqtt_server() == NULL) {
-    LOG(LL_ERROR, ("MQTT requires server name"));
-    return false;
-  }
   mgos_event_add_group_handler(MGOS_EVENT_GRP_NET, mgos_mqtt_net_ev, NULL);
-
-  mgos_mqtt_set_max_qos(mgos_sys_config_get_mqtt_max_qos());
-
   mgos_event_add_handler(MGOS_EVENT_LOG, s_debug_write_cb, NULL);
 
-  return true;
+  return mgos_mqtt_set_config(mgos_sys_config_get_mqtt());
 }
 
 bool mgos_mqtt_global_connect(void) {
@@ -297,31 +371,29 @@ bool mgos_mqtt_global_connect(void) {
   struct mg_mgr *mgr = mgos_get_mgr();
   struct mg_connect_opts opts;
 
+  if (s_cfg == NULL || !s_cfg->enable) return false;
+
   /* If we're already connected, do nothing */
-  if (s_conn != NULL) return ret;
+  if (s_conn != NULL) return true;
 
-  if (!mgos_sys_config_get_mqtt_enable()) {
-    return false;
-  }
-
-  LOG(LL_INFO, ("MQTT connecting to %s", mgos_sys_config_get_mqtt_server()));
   memset(&opts, 0, sizeof(opts));
 #if MG_ENABLE_SSL
-  opts.ssl_cert = mgos_sys_config_get_mqtt_ssl_cert();
-  opts.ssl_key = mgos_sys_config_get_mqtt_ssl_key();
-  opts.ssl_ca_cert = mgos_sys_config_get_mqtt_ssl_ca_cert();
-  opts.ssl_cipher_suites = mgos_sys_config_get_mqtt_ssl_cipher_suites();
-  opts.ssl_psk_identity = mgos_sys_config_get_mqtt_ssl_psk_identity();
-  opts.ssl_psk_key = mgos_sys_config_get_mqtt_ssl_psk_key();
+  opts.ssl_cert = s_cfg->ssl_cert;
+  opts.ssl_key = s_cfg->ssl_key;
+  opts.ssl_ca_cert = s_cfg->ssl_ca_cert;
+  opts.ssl_cipher_suites = s_cfg->ssl_cipher_suites;
+  opts.ssl_psk_identity = s_cfg->ssl_psk_identity;
+  opts.ssl_psk_key = s_cfg->ssl_psk_key;
 #endif
+  LOG(LL_INFO, ("MQTT connecting to %s", s_cfg->server));
 
   s_connected = false;
-  s_conn = mg_connect_opt(mgr, mgos_sys_config_get_mqtt_server(), mgos_mqtt_ev,
-                          NULL, opts);
+  s_conn = mg_connect_opt(mgr, s_cfg->server, mgos_mqtt_ev, NULL, opts);
   if (s_conn != NULL) {
     mg_set_protocol_mqtt(s_conn);
-    s_conn->recv_mbuf_limit = mgos_sys_config_get_mqtt_recv_mbuf_limit();
+    s_conn->recv_mbuf_limit = s_cfg->recv_mbuf_limit;
   } else {
+    mqtt_global_reconnect();
     ret = false;
   }
   return ret;
@@ -329,23 +401,22 @@ bool mgos_mqtt_global_connect(void) {
 
 static void reconnect_timer_cb(void *user_data) {
   s_reconnect_timer_id = MGOS_INVALID_TIMER_ID;
-  if (!mgos_mqtt_global_connect()) {
-    mqtt_global_reconnect();
-  }
+  mgos_mqtt_global_connect();
   (void) user_data;
 }
 
 static void mqtt_global_reconnect(void) {
   int rt_ms;
+  if (s_cfg == NULL || s_cfg->server == NULL) return;
+
   if (s_reconnect_timeout_ms <= 0) s_reconnect_timeout_ms = 1;
   rt_ms = s_reconnect_timeout_ms * 2;
-  if (mgos_sys_config_get_mqtt_server() == NULL) return;
 
-  if (rt_ms < mgos_sys_config_get_mqtt_reconnect_timeout_min() * 1000) {
-    rt_ms = mgos_sys_config_get_mqtt_reconnect_timeout_min() * 1000;
+  if (rt_ms < s_cfg->reconnect_timeout_min * 1000) {
+    rt_ms = s_cfg->reconnect_timeout_min * 1000;
   }
-  if (rt_ms > mgos_sys_config_get_mqtt_reconnect_timeout_max() * 1000) {
-    rt_ms = mgos_sys_config_get_mqtt_reconnect_timeout_max() * 1000;
+  if (rt_ms > s_cfg->reconnect_timeout_max * 1000) {
+    rt_ms = s_cfg->reconnect_timeout_max * 1000;
   }
   /* Fuzz the time a little. */
   rt_ms = (int) mgos_rand_range(rt_ms * 0.9, rt_ms * 1.1);
@@ -372,6 +443,27 @@ bool mgos_mqtt_pub(const char *topic, const void *message, size_t len, int qos,
                  (const char *) message));
   mg_mqtt_publish(c, topic, mgos_mqtt_get_packet_id(), flags, message, len);
   return true;
+}
+
+bool mgos_mqtt_pubf(const char *topic, int qos, bool retain,
+                    const char *json_fmt, ...) {
+  bool res;
+  va_list ap;
+  va_start(ap, json_fmt);
+  res = mgos_mqtt_pubv(topic, qos, retain, json_fmt, ap);
+  va_end(ap);
+  return res;
+}
+
+bool mgos_mqtt_pubv(const char *topic, int qos, bool retain,
+                    const char *json_fmt, va_list ap) {
+  bool res = false;
+  char *msg = json_vasprintf(json_fmt, ap);
+  if (msg != NULL) {
+    res = mgos_mqtt_pub(topic, msg, strlen(msg), qos, retain);
+    free(msg);
+  }
+  return res;
 }
 
 struct sub_data {
