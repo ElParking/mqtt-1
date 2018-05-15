@@ -255,7 +255,7 @@ static void s_debug_write_cb(int ev, void *ev_data, void *userdata) {
       struct json_out jmo = JSON_OUT_BUF(msg, MGOS_DEBUG_TMP_BUF_SIZE);
       msg_len = json_printf(&jmo, "{id: %Q, seq: %u ,time: %.3lf, fd:%d, message: %.*Q}",
         (mgos_sys_config_get_device_id() ? mgos_sys_config_get_device_id()
-                                         : "-"), s_seq, mg_time(), arg->fd, (int) arg->len, (const char *) arg->data);
+                                         : "-"), s_seq, mg_time(), arg->fd, (int) arg->len, arg->data);
     }else{
       msg_len = mg_asprintf(
         &msg, MGOS_DEBUG_TMP_BUF_SIZE, "%s %u %.3lf %d|%.*s",
